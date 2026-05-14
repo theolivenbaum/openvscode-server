@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License. See LICENSE.txt for license information.
 
+using Microsoft.AspNetCore.Http;
+
 namespace OpenVSCodeServer.Kestrel;
 
 /// <summary>
@@ -284,4 +286,49 @@ public sealed class VSCodeSessionOptions
 	/// sessions. The temp folders are leaks otherwise — nothing else cleans them up.
 	/// </summary>
 	public bool CleanOrphansOnStartup { get; set; } = true;
+
+	/// <summary>
+	/// Optional hook invoked at the start of <c>POST /sessions</c>, before any temp folder is
+	/// created or <see cref="IVSCodeFiles.InitializeAsync"/> runs. Implementers use this to
+	/// authenticate the caller (cookie, JWT, header, tenant claims …) and either:
+	/// <list type="bullet">
+	///   <item>Return <c>null</c> to allow the session to be created.</item>
+	///   <item>Return a non-null <see cref="IResult"/> (e.g. <see cref="Results.Unauthorized"/>,
+	///   <see cref="Results.Forbid"/>, <see cref="Results.Problem(string?, string?, int?, string?, string?)"/>)
+	///   to short-circuit the request — the returned result is written to the response verbatim
+	///   and the session is NOT created.</item>
+	/// </list>
+	/// <para>The hook may also mutate
+	/// <see cref="VSCodeSessionValidationContext.State"/> to thread server-trusted values
+	/// (resolved user id, tenant id, document id) down to
+	/// <see cref="IVSCodeFiles.InitializeAsync"/>; the mutated dictionary is what ends up on
+	/// <see cref="VSCodeSessionContext.State"/>.</para>
+	/// <para>The library deliberately does not enforce authentication on the other session
+	/// endpoints (<c>GET</c>, <c>DELETE</c>, heartbeat) or on the IDE proxy itself — gate those
+	/// with the host's normal ASP.NET Core authorization policies (e.g.
+	/// <c>app.MapOpenVSCodeServer("/ide").WithSessions("/sessions").RequireAuthorization()</c>).</para>
+	/// </summary>
+	public Func<VSCodeSessionValidationContext, ValueTask<IResult?>>? ValidateUser { get; set; }
+}
+
+/// <summary>
+/// Context handed to <see cref="VSCodeSessionOptions.ValidateUser"/>. Carries the in-flight
+/// <see cref="HttpContext"/> so the hook can read claims, cookies, headers etc., plus the
+/// mutable <c>state</c> dictionary parsed from the request body.
+/// </summary>
+public sealed class VSCodeSessionValidationContext
+{
+	/// <summary>
+	/// The HTTP context for the <c>POST /sessions</c> request. <see cref="HttpContext.User"/> is
+	/// the authenticated principal (when an auth scheme ran upstream); <see cref="HttpContext.RequestServices"/>
+	/// resolves any DI services the hook depends on.
+	/// </summary>
+	public required HttpContext HttpContext { get; init; }
+
+	/// <summary>
+	/// Mutable view of the <c>state</c> dictionary supplied by the client. The hook may add or
+	/// overwrite entries (e.g. to attach a server-trusted user id) and the resulting dictionary
+	/// is what gets passed to <see cref="IVSCodeFiles.InitializeAsync"/>.
+	/// </summary>
+	public required IDictionary<string, string> State { get; init; }
 }

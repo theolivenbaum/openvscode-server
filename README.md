@@ -161,6 +161,29 @@ That exposes:
 
 Sessions also self-evict after `Sessions.IdleTimeout` (default 30 min); the sweeper looks at every active session every `Sessions.IdleSweepInterval` (default 1 min) and ends any that haven't seen traffic. Proxy traffic with a matching `?folder=` query refreshes the timer automatically, so users actively editing a workbench tab don't get evicted. Set `IdleTimeout` to `TimeSpan.Zero` to disable idle GC entirely.
 
+### Authenticating session creation
+
+Plug your own auth into `Sessions.ValidateUser`. The hook runs at the top of `POST /sessions`, before any temp folder is created. Return `null` to accept the request or any `IResult` (e.g. `Results.Unauthorized()`) to reject it; the hook can also mutate the `state` dictionary to thread server-trusted values (user id, tenant) down to `IVSCodeFiles.InitializeAsync`.
+
+```csharp
+builder.Services.AddOpenVSCodeServer(options =>
+{
+    options.Sessions.ValidateUser = ctx =>
+    {
+        if (ctx.HttpContext.User.Identity?.IsAuthenticated != true)
+        {
+            return ValueTask.FromResult<IResult?>(Results.Unauthorized());
+        }
+
+        // Trust the server-side claim over anything the client put in the body.
+        ctx.State["userId"] = ctx.HttpContext.User.FindFirst("sub")!.Value;
+        return ValueTask.FromResult<IResult?>(null);
+    };
+});
+```
+
+The other session endpoints (`GET`, `DELETE`, heartbeat) and the IDE proxy itself are intentionally not gated by this hook — apply your usual `RequireAuthorization()` / per-route policies for those. Pair `ValidateUser` with route-level authorization for defense in depth.
+
 `CleanOrphansOnStartup` (default `true`) wipes any leftover session folders under `Sessions.RootDirectory` on host startup. This handles temp leaks from prior crashed processes — there's nothing else cleaning those folders up.
 
 ### File-watcher trade-off

@@ -153,7 +153,27 @@ public static class OpenVSCodeServerEndpointRouteBuilderExtensions
 			}
 		}
 
-		var session = await manager.CreateAsync(body?.State, context.RequestAborted).ConfigureAwait(false);
+		// Materialize the state dict eagerly so the validation hook can mutate it; whatever it
+		// looks like after the hook returns is what gets handed to IVSCodeFiles.
+		var state = body?.State is { } supplied
+			? new Dictionary<string, string>(supplied, StringComparer.Ordinal)
+			: new Dictionary<string, string>(StringComparer.Ordinal);
+
+		var validate = opts.Value.Sessions.ValidateUser;
+		if (validate is not null)
+		{
+			var rejection = await validate(new VSCodeSessionValidationContext
+			{
+				HttpContext = context,
+				State = state,
+			}).ConfigureAwait(false);
+			if (rejection is not null)
+			{
+				return rejection;
+			}
+		}
+
+		var session = await manager.CreateAsync(state, context.RequestAborted).ConfigureAwait(false);
 
 		return Results.Json(BuildResponse(session, opts.Value), SessionJson.Options, statusCode: StatusCodes.Status201Created);
 	}
