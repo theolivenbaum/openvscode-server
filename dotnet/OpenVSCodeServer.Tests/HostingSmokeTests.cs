@@ -218,6 +218,139 @@ public class HostingSmokeTests
 	}
 
 	[Fact]
+	public async Task Host_RequireSessionInPath_Rejects_Unknown_And_Forwards_Known()
+	{
+		// Boots the host with RequireSessionInPath enabled, points the proxy at a stub upstream
+		// that captures the X-Forwarded-Prefix header, and asserts the path-validation behaviour
+		// directly without needing the full Node child. Anything that hits the upstream means the
+		// route accepted the request; anything 404'd by Kestrel never reached it.
+
+		// 1. Stand up a stub upstream that echoes the X-Forwarded-Prefix it sees so the test can
+		//    assert the proxy is propagating the session-scoped prefix.
+		using var upstreamHost = new HttpListener();
+		var upstreamPort = AllocateFreePort();
+		upstreamHost.Prefixes.Add($"http://127.0.0.1:{upstreamPort}/");
+		upstreamHost.Start();
+
+		var upstreamHits = new System.Collections.Concurrent.ConcurrentQueue<(string Path, string? Prefix)>();
+		var upstreamLoop = Task.Run(async () =>
+		{
+			while (upstreamHost.IsListening)
+			{
+				HttpListenerContext ctx;
+				try { ctx = await upstreamHost.GetContextAsync(); }
+				catch { return; }
+
+				upstreamHits.Enqueue((ctx.Request.Url!.PathAndQuery, ctx.Request.Headers["X-Forwarded-Prefix"]));
+				ctx.Response.StatusCode = 200;
+				ctx.Response.ContentType = "text/plain";
+				await using (var w = new StreamWriter(ctx.Response.OutputStream))
+				{
+					await w.WriteAsync("ok");
+				}
+				ctx.Response.Close();
+			}
+		});
+
+		try
+		{
+			var port = AllocateFreePort();
+			var sessionsRoot = Directory.CreateTempSubdirectory("openvscode-session-path-").FullName;
+
+			var builder = CreateIsolatedBuilder(port);
+			// Skip starting a real Node child by providing a fake OpenVSCodeServerProcess via the
+			// process options below. The integration test cares about routing, not upstream
+			// content. We piggyback on ExternalServerPath being unset + replacing the proxy at the
+			// DI level.
+			builder.Services.AddOptions<OpenVSCodeServerOptions>().Configure(o =>
+			{
+				o.PathPrefix = "/ide";
+				o.PathPrefixSet = true;
+				o.Sessions.RootDirectory = sessionsRoot;
+				o.Sessions.IdleTimeout = TimeSpan.Zero;
+				o.Sessions.CleanOrphansOnStartup = false;
+				o.Sessions.RequireSessionInPath = true;
+				o.WithoutConnectionToken = true;
+			});
+			builder.Services.AddSingleton<HostingSmokeTests.SeedingFiles>();
+			builder.Services.AddVSCodeFiles<HostingSmokeTests.SeedingFiles>();
+			builder.Services.AddScoped<IVSCodeFiles>(sp => sp.GetRequiredService<HostingSmokeTests.SeedingFiles>());
+			// Stub the process and proxy so requests go to our HttpListener instead of a real
+			// Node child.
+			builder.Services.AddSingleton<OpenVSCodeServerProxy>(sp =>
+				StubProxy.Create(sp, new Uri($"http://127.0.0.1:{upstreamPort}/")));
+
+			using var app = builder.Build();
+			app.MapOpenVSCodeServer("/ide").WithSessions("/sessions");
+
+			await app.StartAsync();
+			try
+			{
+				using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+
+				// 404 for an unknown session id even though the path shape is otherwise valid.
+				var ghost = await http.GetAsync("/ide/does-not-exist/index.html");
+				Assert.Equal(HttpStatusCode.NotFound, ghost.StatusCode);
+				Assert.Empty(upstreamHits);
+
+				// Create a real session and hit its scoped URL.
+				var createResp = await http.PostAsJsonAsync("/sessions", new { });
+				Assert.Equal(HttpStatusCode.Created, createResp.StatusCode);
+				var created = await createResp.Content.ReadFromJsonAsync<JsonElement>();
+				var sessionId = created.GetProperty("sessionId").GetString()!;
+				var ideUrl = created.GetProperty("ideUrl").GetString()!;
+
+				Assert.StartsWith($"/ide/{sessionId}/?folder=", ideUrl);
+
+				var ok = await http.GetAsync($"/ide/{sessionId}/static/assets/app.js");
+				Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+
+				Assert.True(upstreamHits.TryDequeue(out var hit));
+				Assert.Equal("/ide/static/assets/app.js", hit.Path);
+				Assert.Equal($"/ide/{sessionId}", hit.Prefix);
+			}
+			finally
+			{
+				await app.StopAsync();
+				try { Directory.Delete(sessionsRoot, recursive: true); } catch { /* best-effort */ }
+			}
+		}
+		finally
+		{
+			upstreamHost.Stop();
+			upstreamHost.Close();
+			await upstreamLoop;
+		}
+	}
+
+	/// <summary>
+	/// Builds a <see cref="OpenVSCodeServerProxy"/> whose upstream is the supplied <see cref="Uri"/>
+	/// instead of the real Node child. Allows the routing tests to run without the heavy upstream.
+	/// </summary>
+	private static class StubProxy
+	{
+		public static OpenVSCodeServerProxy Create(IServiceProvider sp, Uri upstream)
+		{
+			var process = (OpenVSCodeServerProcess)System.Runtime.CompilerServices.RuntimeHelpers
+				.GetUninitializedObject(typeof(OpenVSCodeServerProcess));
+
+			// OpenVSCodeServerProcess.ReadyUri is backed by a TaskCompletionSource<Uri> we need
+			// to satisfy. Reach into the private field reflectively — it's test-only scaffolding.
+			var tcsField = typeof(OpenVSCodeServerProcess)
+				.GetField("_readyTcs", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+			var tcs = new TaskCompletionSource<Uri>(TaskCreationOptions.RunContinuationsAsynchronously);
+			tcs.SetResult(upstream);
+			tcsField.SetValue(process, tcs);
+
+			var logger = sp.GetRequiredService<ILoggerFactory>()
+				.CreateLogger<OpenVSCodeServerProxy>();
+			var manager = sp.GetService<VSCodeSessionManager>();
+			var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<OpenVSCodeServerOptions>>();
+			return new OpenVSCodeServerProxy(logger, process, metrics: null, sessionManager: manager, options: opts);
+		}
+	}
+
+	[Fact]
 	public async Task Host_Boots_Sessions_Endpoint_And_Workbench_Loads_Session_Folder()
 	{
 		// End-to-end smoke: spin the real Node child up, POST /sessions to create a session-scoped
