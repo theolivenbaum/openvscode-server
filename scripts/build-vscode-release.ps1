@@ -63,9 +63,16 @@ try {
     }
 
     # --- gulp build --------------------------------------------------------
+    # Invoke gulp directly so we can cap V8's heap below the package.json default of 8192 MiB.
+    # Microsoft-hosted CI agents (ubuntu-latest, windows-latest, macos-latest) only have ~7 GiB
+    # of RAM, so an 8 GiB heap forces the OS to swap during the minification stage and triggers
+    # "Free memory is lower than 5%" agent warnings. 6144 MiB leaves headroom for the rest of
+    # the toolchain (esbuild, terser, native module compilation) without OOM-ing on small hosts.
+    # Override with VSCODE_NODE_MAX_OLD_SPACE_MB on beefier machines.
+    $nodeMaxOldSpaceMb = if ($env:VSCODE_NODE_MAX_OLD_SPACE_MB) { $env:VSCODE_NODE_MAX_OLD_SPACE_MB } else { '6144' }
     $gulpTask = "$distroName-min"
-    Write-Host "==> npm run gulp -- $gulpTask"
-    & npm run gulp -- $gulpTask
+    Write-Host "==> gulp $gulpTask (--max-old-space-size=$nodeMaxOldSpaceMb)"
+    & node "--max-old-space-size=$nodeMaxOldSpaceMb" ./node_modules/gulp/bin/gulp.js $gulpTask
     if ($LASTEXITCODE -ne 0) {
         throw "gulp $gulpTask failed with exit code $LASTEXITCODE"
     }
