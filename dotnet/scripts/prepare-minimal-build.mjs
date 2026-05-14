@@ -6,8 +6,13 @@
 //      compileNativeExtensionsBuildTask skip them.
 //   2. Clearing `builtInExtensions` in product.json so the marketplace
 //      .vsix download step is a no-op.
+//   3. Swapping the reh-web compile step from compileBuildWithManglingTask
+//      to compileBuildWithoutManglingTask. The mangler holds a full
+//      symbol-rename map in memory while the TS compiler is also active,
+//      which is the main source of OOM/heavy-swap during compile-src on
+//      hosted 7 GiB CI agents.
 //
-// Both files are first restored from HEAD, so the script is idempotent.
+// All three files are first restored from HEAD, so the script is idempotent.
 // Wired into scripts/build-vscode-release.{sh,ps1} behind the
 // VSCODE_MINIMAL_BUILD=1 env var.
 
@@ -21,6 +26,7 @@ const repoRoot = resolve(here, '..', '..');
 
 const EXTENSIONS_TS = join(repoRoot, 'build', 'lib', 'extensions.ts');
 const PRODUCT_JSON  = join(repoRoot, 'product.json');
+const GULPFILE_REH  = join(repoRoot, 'build', 'gulpfile.reh.ts');
 
 // Local extensions (under extensions/) to drop. Kept:
 //   configuration-editing, json-language-features, markdown-language-features,
@@ -102,13 +108,14 @@ const DROP_LOCAL = [
 	'vb'
 ];
 
-// Restore both files from git so the patch always runs against a known
-// baseline. Re-running the script is a no-op.
+// Restore the patched files from git so the patch always runs against a
+// known baseline. Re-running the script is a no-op.
 execFileSync(
 	'git',
 	['checkout', 'HEAD', '--',
 		relative(repoRoot, EXTENSIONS_TS),
-		relative(repoRoot, PRODUCT_JSON)],
+		relative(repoRoot, PRODUCT_JSON),
+		relative(repoRoot, GULPFILE_REH)],
 	{ cwd: repoRoot, stdio: 'inherit' }
 );
 
@@ -128,7 +135,26 @@ const product = JSON.parse(readFileSync(PRODUCT_JSON, 'utf8'));
 product.builtInExtensions = [];
 writeFileSync(PRODUCT_JSON, JSON.stringify(product, null, '\t') + '\n');
 
+// --- build/gulpfile.reh.ts --------------------------------------------------
+// Swap compileBuildWithManglingTask -> compileBuildWithoutManglingTask. The
+// mangler is what spikes memory during compile-src on small CI agents.
+let reh = readFileSync(GULPFILE_REH, 'utf8');
+const manglerReplacements = [
+	{
+		from: `import { compileBuildWithManglingTask } from './gulpfile.compile.ts';`,
+		to: `import { compileBuildWithoutManglingTask as compileBuildWithManglingTask } from './gulpfile.compile.ts';`
+	}
+];
+for (const { from, to } of manglerReplacements) {
+	if (!reh.includes(from)) {
+		throw new Error(`Cannot find expected text in ${GULPFILE_REH}:\n  ${from}`);
+	}
+	reh = reh.replace(from, to);
+}
+writeFileSync(GULPFILE_REH, reh);
+
 console.log(
-	`==> Minimal build: excluded ${DROP_LOCAL.length} local extensions and ` +
-	`cleared product.json builtInExtensions.`
+	`==> Minimal build: excluded ${DROP_LOCAL.length} local extensions, ` +
+	`cleared product.json builtInExtensions, and disabled the mangler ` +
+	`for compile-src.`
 );
