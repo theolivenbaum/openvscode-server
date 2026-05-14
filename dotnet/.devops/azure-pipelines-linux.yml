@@ -1,6 +1,6 @@
-# Azure DevOps pipeline that builds the openvscode-server linux-x64
-# distribution, packs it into the .NET library, and publishes the resulting
-# NuGet package as a build artifact.
+# Azure DevOps pipeline that builds the openvscode-server linux
+# distribution and publishes the resulting tar.gz archive as a build
+# artifact for later embedding into the .NET library.
 #
 # Trigger this pipeline from Azure DevOps and select it as the YAML source:
 #   dotnet/.devops/azure-pipelines-linux.yml
@@ -8,12 +8,10 @@
 # What it does, in order:
 #   1. Checks out the repository.
 #   2. Installs the Node.js version pinned in .nvmrc.
-#   3. Installs the .NET SDK that the library targets (net10.0).
-#   4. Runs scripts/build-vscode-release.sh linux x64 to produce
-#      vscode-reh-web-linux-x64.tar.gz under
+#   3. Runs scripts/build-vscode-release.sh linux <arch> to produce
+#      vscode-reh-web-linux-<arch>.tar.gz under
 #      dotnet/OpenVSCodeServer.Kestrel/EmbeddedAssets/.
-#   5. Runs `dotnet pack` so the .nupkg embeds the freshly-built archive.
-#   6. Publishes both the .tar.gz and the .nupkg as pipeline artifacts.
+#   4. Publishes the .tar.gz as a pipeline artifact.
 
 name: $(Date:yyyyMMdd).$(Rev:r)
 
@@ -21,12 +19,6 @@ trigger: none           # manual / scheduled / API-driven; no automatic trigger
 pr: none
 
 parameters:
-  - name: buildConfiguration
-    type: string
-    default: Release
-    values:
-      - Debug
-      - Release
   - name: vscodeArch
     type: string
     default: x64
@@ -39,8 +31,6 @@ variables:
     value: ubuntu-latest
   - name: vscodePlatform
     value: linux
-  - name: dotnetSdkVersion
-    value: '10.0.x'
   - name: ELECTRON_SKIP_BINARY_DOWNLOAD
     value: '1'
   - name: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD
@@ -71,12 +61,6 @@ stages:
               versionSource: 'fromFile'
               versionFilePath: '.nvmrc'
 
-          - task: UseDotNet@2
-            displayName: Use .NET SDK $(dotnetSdkVersion)
-            inputs:
-              packageType: sdk
-              version: $(dotnetSdkVersion)
-
           - bash: |
               set -e
               # Native build deps needed by node-gyp on hosted Ubuntu agents
@@ -98,7 +82,6 @@ stages:
               set -e
               node --version
               npm  --version
-              dotnet --info
             displayName: Show tool versions
 
           - bash: |
@@ -118,40 +101,9 @@ stages:
               du -h  dotnet/OpenVSCodeServer.Kestrel/EmbeddedAssets/*.tar.gz
             displayName: Show staged archive(s)
 
-          - task: DotNetCoreCLI@2
-            displayName: dotnet restore
-            inputs:
-              command: restore
-              projects: dotnet/OpenVSCodeServer.slnx
-
-          - task: DotNetCoreCLI@2
-            displayName: dotnet build (${{ parameters.buildConfiguration }})
-            inputs:
-              command: build
-              projects: dotnet/OpenVSCodeServer.slnx
-              arguments: --configuration ${{ parameters.buildConfiguration }} --no-restore
-
-          - task: DotNetCoreCLI@2
-            displayName: dotnet pack (${{ parameters.buildConfiguration }})
-            inputs:
-              command: pack
-              packagesToPack: dotnet/OpenVSCodeServer.Kestrel/OpenVSCodeServer.Kestrel.csproj
-              configuration: ${{ parameters.buildConfiguration }}
-              nobuild: true
-              includesymbols: true
-              versioningScheme: off
-              outputDir: $(Build.ArtifactStagingDirectory)/nupkg
-
           - task: PublishPipelineArtifact@1
             displayName: Publish reh-web archive
             inputs:
               targetPath: dotnet/OpenVSCodeServer.Kestrel/EmbeddedAssets
               artifact: vscode-reh-web-linux-${{ parameters.vscodeArch }}
-              publishLocation: pipeline
-
-          - task: PublishPipelineArtifact@1
-            displayName: Publish NuGet package
-            inputs:
-              targetPath: $(Build.ArtifactStagingDirectory)/nupkg
-              artifact: OpenVSCodeServer.Kestrel-linux-${{ parameters.vscodeArch }}-nupkg
               publishLocation: pipeline
