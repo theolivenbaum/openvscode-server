@@ -1,0 +1,134 @@
+#!/usr/bin/env node
+// Trim the openvscode-server build for a pure C# / BYO-language-server
+// environment, by:
+//   1. Appending unneeded local extensions to `excludedExtensions` in
+//      build/lib/extensions.ts so compileNonNativeExtensionsBuildTask /
+//      compileNativeExtensionsBuildTask skip them.
+//   2. Clearing `builtInExtensions` in product.json so the marketplace
+//      .vsix download step is a no-op.
+//
+// Both files are first restored from HEAD, so the script is idempotent.
+// Wired into scripts/build-vscode-release.{sh,ps1} behind the
+// VSCODE_MINIMAL_BUILD=1 env var.
+
+import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(here, '..', '..');
+
+const EXTENSIONS_TS = join(repoRoot, 'build', 'lib', 'extensions.ts');
+const PRODUCT_JSON  = join(repoRoot, 'product.json');
+
+// Local extensions (under extensions/) to drop. Kept:
+//   configuration-editing, json-language-features, markdown-language-features,
+//   media-preview, merge-conflict, references-view, search-result,
+//   csharp, razor, json, log, markdown-basics, shellscript, diff, ini, xml,
+//   yaml,
+//   all theme-* packs.
+const DROP_LOCAL = [
+	// Rich (esbuild-built) extensions not needed for a C# environment.
+	'css-language-features',
+	'emmet',
+	'extension-editing',
+	'grunt',
+	'gulp',
+	'html-language-features',
+	'jake',
+	'markdown-math',
+	'mermaid-chat-features',
+	'npm',
+	'php-language-features',
+	'simple-browser',
+	'terminal-suggest',
+	'tunnel-forwarding',
+	'typescript-language-features',
+
+	// JS-only extensions (no esbuild) not needed for a C# environment.
+	// Note: dropping `git` and `github` is what makes it safe to also drop
+	// `git-base`, which only those two extensions depend on.
+	'debug-auto-launch',
+	'debug-server-ready',
+	'git',
+	'git-base',
+	'github',
+	'github-authentication',
+	'ipynb',
+	'microsoft-authentication',
+	'notebook-renderers',
+
+	// Language "basics" packs (TextMate grammars + snippets) for languages
+	// not used. Kept: csharp, razor, json, log, markdown-basics, shellscript,
+	// diff, ini, xml, yaml.
+	'bat',
+	'clojure',
+	'coffeescript',
+	'cpp',
+	'css',
+	'dart',
+	'docker',
+	'dotenv',
+	'fsharp',
+	'go',
+	'groovy',
+	'handlebars',
+	'hlsl',
+	'html',
+	'java',
+	'javascript',
+	'julia',
+	'latex',
+	'less',
+	'lua',
+	'make',
+	'objective-c',
+	'perl',
+	'php',
+	'powershell',
+	'prompt-basics',
+	'pug',
+	'python',
+	'r',
+	'restructuredtext',
+	'ruby',
+	'rust',
+	'scss',
+	'shaderlab',
+	'sql',
+	'swift',
+	'typescript-basics',
+	'vb'
+];
+
+// Restore both files from git so the patch always runs against a known
+// baseline. Re-running the script is a no-op.
+execFileSync(
+	'git',
+	['checkout', 'HEAD', '--',
+		relative(repoRoot, EXTENSIONS_TS),
+		relative(repoRoot, PRODUCT_JSON)],
+	{ cwd: repoRoot, stdio: 'inherit' }
+);
+
+// --- build/lib/extensions.ts ------------------------------------------------
+let ts = readFileSync(EXTENSIONS_TS, 'utf8');
+const marker = 'const excludedExtensions = [';
+if (!ts.includes(marker)) {
+	throw new Error(`Cannot find '${marker}' in ${EXTENSIONS_TS}`);
+}
+const additions = DROP_LOCAL.map(n => `\t'${n}',`).join('\n');
+ts = ts.replace(marker, `${marker}\n${additions}`);
+writeFileSync(EXTENSIONS_TS, ts);
+
+// --- product.json -----------------------------------------------------------
+// Preserve key order and tab indentation by parsing/serialising round-trip.
+const product = JSON.parse(readFileSync(PRODUCT_JSON, 'utf8'));
+product.builtInExtensions = [];
+writeFileSync(PRODUCT_JSON, JSON.stringify(product, null, '\t') + '\n');
+
+console.log(
+	`==> Minimal build: excluded ${DROP_LOCAL.length} local extensions and ` +
+	`cleared product.json builtInExtensions.`
+);

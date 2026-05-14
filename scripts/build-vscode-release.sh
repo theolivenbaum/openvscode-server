@@ -59,6 +59,14 @@ echo "    repo: ${ROOT_DIR}"
 
 cd "$ROOT_DIR"
 
+# --- optional: trim extensions for a pure C# / BYO-LSP build -------------------------------
+# Skips the language stacks, JS/TS tooling, GitHub/MS auth flows and Node debugger VSIXs that
+# a customer running their own language server doesn't need. Cuts ~15-30 min of build time.
+if [[ "${VSCODE_MINIMAL_BUILD:-0}" == "1" ]]; then
+    echo "==> VSCODE_MINIMAL_BUILD=1 -> trimming extensions"
+    node dotnet/scripts/prepare-minimal-build.mjs
+fi
+
 # --- npm install -----------------------------------------------------------------------------
 if [[ ! -d node_modules || "${SKIP_NPM_INSTALL:-0}" != "1" ]]; then
     echo "==> npm install (set SKIP_NPM_INSTALL=1 to skip)"

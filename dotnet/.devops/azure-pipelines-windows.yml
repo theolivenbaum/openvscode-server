@@ -36,6 +36,9 @@ variables:
     value: x64
   - name: VSCODE_ARCH
     value: x64
+  # Trim built-in extensions to what a pure C# / BYO-LSP environment needs.
+  - name: VSCODE_MINIMAL_BUILD
+    value: '1'
 
 stages:
   - stage: Build
@@ -75,6 +78,7 @@ stages:
               PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: $(PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD)
               npm_config_arch: $(npm_config_arch)
               VSCODE_ARCH: $(VSCODE_ARCH)
+              VSCODE_MINIMAL_BUILD: $(VSCODE_MINIMAL_BUILD)
 
           - powershell: |
               $ErrorActionPreference = 'Stop'

@@ -27,6 +27,18 @@ Write-Host "    repo: $rootDir"
 
 Push-Location $rootDir
 try {
+    # --- optional: trim extensions for a pure C# / BYO-LSP build -----------
+    # Skips the language stacks, JS/TS tooling, GitHub/MS auth flows and Node
+    # debugger VSIXs that a customer running their own language server doesn't
+    # need. Cuts ~15-30 min of build time.
+    if ($env:VSCODE_MINIMAL_BUILD -eq '1') {
+        Write-Host '==> VSCODE_MINIMAL_BUILD=1 -> trimming extensions'
+        & node dotnet/scripts/prepare-minimal-build.mjs
+        if ($LASTEXITCODE -ne 0) {
+            throw "prepare-minimal-build.mjs exited with code $LASTEXITCODE"
+        }
+    }
+
     # --- npm install -------------------------------------------------------
     $shouldInstall = -not $SkipNpmInstall -and -not (Test-Path (Join-Path $rootDir 'node_modules'))
     if ($env:SKIP_NPM_INSTALL -eq '1') {
