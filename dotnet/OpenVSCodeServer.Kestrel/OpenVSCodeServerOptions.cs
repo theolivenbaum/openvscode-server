@@ -288,6 +288,21 @@ public sealed class VSCodeSessionOptions
 	public bool CleanOrphansOnStartup { get; set; } = true;
 
 	/// <summary>
+	/// When true, <see cref="OpenVSCodeServerEndpointRouteBuilderExtensions.MapOpenVSCodeServer"/>
+	/// mounts the proxy at <c>{prefix}/{sessionId}/{**catchall}</c> instead of the bare
+	/// <c>{prefix}/{**catchall}</c>. Inbound requests whose first path segment after the prefix
+	/// doesn't match a live session are rejected with 404 before any traffic reaches the upstream
+	/// node process. The proxy also sets <c>X-Forwarded-Prefix: {prefix}/{sessionId}</c> on the
+	/// upstream request so vscode emits absolute URLs that include the session id (it honours
+	/// that header in <c>webClientServer.ts</c>).
+	/// <para>The <c>ideUrl</c> returned from <c>POST /sessions</c> includes the session id in the
+	/// path when this flag is set: <c>{prefix}/{sessionId}/?folder=…</c>. Default is false to
+	/// preserve back-compat with hosts that gate access at the ASP.NET Core authorization layer
+	/// instead.</para>
+	/// </summary>
+	public bool RequireSessionInPath { get; set; }
+
+	/// <summary>
 	/// Optional hook invoked at the start of <c>POST /sessions</c>, before any temp folder is
 	/// created or <see cref="IVSCodeFiles.InitializeAsync"/> runs. Implementers use this to
 	/// authenticate the caller (cookie, JWT, header, tenant claims …) and either:

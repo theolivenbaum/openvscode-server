@@ -401,6 +401,74 @@ public class SessionTests
 	}
 
 	[Fact]
+	public async Task NewSessionId_default_is_a_32_char_hex_guid()
+	{
+		await using var sp = BuildServices();
+		var manager = sp.GetRequiredService<VSCodeSessionManager>();
+
+		var session = await manager.CreateAsync(state: null, CancellationToken.None);
+
+		Assert.Equal(32, session.SessionId.Length);
+		Assert.True(Guid.TryParseExact(session.SessionId, "N", out _),
+			$"Default session id should be a 32-char hex GUID; got {session.SessionId}.");
+	}
+
+	[Fact]
+	public async Task CreateAsync_with_supplied_sessionId_uses_it()
+	{
+		await using var sp = BuildServices();
+		var manager = sp.GetRequiredService<VSCodeSessionManager>();
+
+		var session = await manager.CreateAsync("custom-session-1", state: null, CancellationToken.None);
+		Assert.Equal("custom-session-1", session.SessionId);
+		Assert.Same(session, manager.Get("custom-session-1"));
+
+		await Assert.ThrowsAsync<ArgumentException>(
+			() => manager.CreateAsync("not valid", state: null, CancellationToken.None));
+	}
+
+	[Fact]
+	public async Task Http_create_accepts_supplied_sessionId_in_body()
+	{
+		var port = AllocateFreePort();
+		var builder = WebApplication.CreateBuilder();
+		builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+		{
+			["Kestrel:Endpoints:Http:Url"] = $"http://127.0.0.1:{port}",
+		});
+		builder.Logging.SetMinimumLevel(LogLevel.Warning);
+		builder.Services.AddSingleton<RecordingVSCodeFiles>();
+		builder.Services.AddVSCodeFiles<RecordingVSCodeFiles>();
+		builder.Services.AddScoped<IVSCodeFiles>(sp => sp.GetRequiredService<RecordingVSCodeFiles>());
+		builder.Services.AddOptions<OpenVSCodeServerOptions>().Configure(o =>
+		{
+			o.PathPrefix = "/ide";
+			o.PathPrefixSet = true;
+			o.Sessions.IdleTimeout = TimeSpan.Zero;
+		});
+
+		using var app = builder.Build();
+		app.MapOpenVSCodeServerSessions("/sessions");
+		await app.StartAsync();
+		try
+		{
+			using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+
+			var ok = await http.PostAsJsonAsync("/sessions", new { sessionId = "client-supplied-abc123" });
+			Assert.Equal(HttpStatusCode.Created, ok.StatusCode);
+			var json = await ok.Content.ReadFromJsonAsync<JsonElement>();
+			Assert.Equal("client-supplied-abc123", json.GetProperty("sessionId").GetString());
+
+			var bad = await http.PostAsJsonAsync("/sessions", new { sessionId = "has spaces" });
+			Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+		}
+		finally
+		{
+			await app.StopAsync();
+		}
+	}
+
+	[Fact]
 	public async Task ValidateUser_rejecting_short_circuits_session_creation()
 	{
 		var port = AllocateFreePort();

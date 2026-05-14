@@ -2,7 +2,7 @@
 // Licensed under the MIT License. See LICENSE.txt for license information.
 
 using System.Collections.Concurrent;
-using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -130,7 +130,19 @@ internal sealed class VSCodeSessionManager : IHostedService, IAsyncDisposable
 	/// Creates a fresh session, runs the consumer's <see cref="IVSCodeFiles.InitializeAsync"/>,
 	/// and arms the file watcher. Throws if shutdown is already in progress.
 	/// </summary>
+	public Task<VSCodeSession> CreateAsync(
+		IReadOnlyDictionary<string, string>? state,
+		CancellationToken cancellationToken)
+		=> CreateAsync(sessionId: null, state, cancellationToken);
+
+	/// <summary>
+	/// Creates a session with the supplied <paramref name="sessionId"/> (or a fresh GUID when
+	/// null). Throws <see cref="ArgumentException"/> if the supplied id does not match
+	/// <see cref="SessionIdPattern"/>, or <see cref="InvalidOperationException"/> if the id is
+	/// already in use.
+	/// </summary>
 	public async Task<VSCodeSession> CreateAsync(
+		string? sessionId,
 		IReadOnlyDictionary<string, string>? state,
 		CancellationToken cancellationToken)
 	{
@@ -139,7 +151,17 @@ internal sealed class VSCodeSessionManager : IHostedService, IAsyncDisposable
 			throw new InvalidOperationException("The session manager is shutting down; no new sessions can be created.");
 		}
 
-		var sessionId = NewSessionId();
+		if (sessionId is null)
+		{
+			sessionId = NewSessionId();
+		}
+		else if (!IsValidSessionId(sessionId))
+		{
+			throw new ArgumentException(
+				$"Session id '{sessionId}' is not valid. Allowed characters: letters, digits, '-', and '_'; length 1–64.",
+				nameof(sessionId));
+		}
+
 		var folder = Path.Combine(ResolveRoot(), sessionId);
 		Directory.CreateDirectory(folder);
 
@@ -345,9 +367,23 @@ internal sealed class VSCodeSessionManager : IHostedService, IAsyncDisposable
 
 	private static string NewSessionId()
 	{
-		// 128 random bits, URL-safe base64. ~22 chars.
-		var bytes = RandomNumberGenerator.GetBytes(16);
-		return Convert.ToBase64String(bytes)
-			.Replace('+', '-').Replace('/', '_').TrimEnd('=');
+		// 128 random bits formatted as a 32-character lowercase hex GUID. Matches the format
+		// callers can supply themselves and is filesystem/URL safe everywhere.
+		return Guid.NewGuid().ToString("N");
 	}
+
+	/// <summary>
+	/// Regex describing acceptable session ids supplied by callers via <c>POST /sessions</c>.
+	/// Restricted to URL-safe characters so the id is safe to splice into path segments without
+	/// further encoding.
+	/// </summary>
+	internal static readonly Regex SessionIdPattern =
+		new("^[A-Za-z0-9_-]{1,64}$", RegexOptions.Compiled);
+
+	/// <summary>
+	/// Returns true if <paramref name="sessionId"/> matches the public character set. Useful for
+	/// proxy middleware that needs to validate a path segment before treating it as a session id.
+	/// </summary>
+	public static bool IsValidSessionId(string sessionId)
+		=> !string.IsNullOrEmpty(sessionId) && SessionIdPattern.IsMatch(sessionId);
 }

@@ -52,24 +52,69 @@ public static class OpenVSCodeServerEndpointRouteBuilderExtensions
 			options.AdditionalMountPrefixes.Add(pathPrefix);
 		}
 
-		var route = pathPrefix == "/" ? "/{**catchall}" : pathPrefix + "/{**catchall}";
 		var capturedPrefix = pathPrefix;
+		var methods = new[] { "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
 
-		var inner = endpoints.MapMethods(
-			route,
-			new[] { "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" },
-			async (HttpContext context, OpenVSCodeServerProxy proxy, IOptions<OpenVSCodeServerOptions> opts) =>
-			{
-				var inboundPrefix = capturedPrefix == "/" ? PathString.Empty : new PathString(capturedPrefix);
-				// The canonical prefix is what the child server was started with as
-				// --server-base-path. For the first mount this equals the inbound prefix; for
-				// secondary mounts of the same backing process it differs, and the proxy must
-				// rewrite paths to use the canonical one.
-				var canonical = opts.Value.PathPrefix;
-				var upstreamPrefix = canonical == "/" ? PathString.Empty : new PathString(canonical);
-				await proxy.HandleAsync(context, inboundPrefix, upstreamPrefix);
-			})
-			.WithDisplayName($"OpenVSCode Server ({pathPrefix})");
+		IEndpointConventionBuilder inner;
+		if (options.Sessions.RequireSessionInPath)
+		{
+			// Session-scoped mount: only requests whose path looks like
+			// `{prefix}/{sessionId}/...` and resolve to a live session reach the upstream.
+			var route = pathPrefix == "/"
+				? "/{sessionId}/{**catchall}"
+				: pathPrefix + "/{sessionId}/{**catchall}";
+
+			inner = endpoints.MapMethods(
+				route,
+				methods,
+				async (HttpContext context, string sessionId, OpenVSCodeServerProxy proxy,
+					VSCodeSessionManager sessions, IOptions<OpenVSCodeServerOptions> opts) =>
+				{
+					if (!VSCodeSessionManager.IsValidSessionId(sessionId)
+						|| sessions.Get(sessionId) is not { } session)
+					{
+						context.Response.StatusCode = StatusCodes.Status404NotFound;
+						return;
+					}
+
+					session.Touch();
+
+					var prefixWithSession = capturedPrefix == "/"
+						? "/" + sessionId
+						: capturedPrefix + "/" + sessionId;
+					var inboundPrefix = new PathString(prefixWithSession);
+
+					// vscode's webClientServer reads `X-Forwarded-Prefix` and uses it as the base
+					// for emitted absolute URLs (see upstream `webClientServer.ts`), so the
+					// browser sees URLs that already include the session id.
+					context.Request.Headers["X-Forwarded-Prefix"] = prefixWithSession;
+
+					var canonical = opts.Value.PathPrefix;
+					var upstreamPrefix = canonical == "/" ? PathString.Empty : new PathString(canonical);
+					await proxy.HandleAsync(context, inboundPrefix, upstreamPrefix);
+				})
+				.WithDisplayName($"OpenVSCode Server (session-scoped {pathPrefix})");
+		}
+		else
+		{
+			var route = pathPrefix == "/" ? "/{**catchall}" : pathPrefix + "/{**catchall}";
+
+			inner = endpoints.MapMethods(
+				route,
+				methods,
+				async (HttpContext context, OpenVSCodeServerProxy proxy, IOptions<OpenVSCodeServerOptions> opts) =>
+				{
+					var inboundPrefix = capturedPrefix == "/" ? PathString.Empty : new PathString(capturedPrefix);
+					// The canonical prefix is what the child server was started with as
+					// --server-base-path. For the first mount this equals the inbound prefix; for
+					// secondary mounts of the same backing process it differs, and the proxy must
+					// rewrite paths to use the canonical one.
+					var canonical = opts.Value.PathPrefix;
+					var upstreamPrefix = canonical == "/" ? PathString.Empty : new PathString(canonical);
+					await proxy.HandleAsync(context, inboundPrefix, upstreamPrefix);
+				})
+				.WithDisplayName($"OpenVSCode Server ({pathPrefix})");
+		}
 
 		return new OpenVSCodeServerEndpointBuilder(endpoints, inner);
 	}
@@ -173,7 +218,20 @@ public static class OpenVSCodeServerEndpointRouteBuilderExtensions
 			}
 		}
 
-		var session = await manager.CreateAsync(state, context.RequestAborted).ConfigureAwait(false);
+		VSCodeSession session;
+		try
+		{
+			session = await manager.CreateAsync(body?.SessionId, state, context.RequestAborted)
+				.ConfigureAwait(false);
+		}
+		catch (ArgumentException ex)
+		{
+			return Results.BadRequest(new { error = "invalid_session_id", message = ex.Message });
+		}
+		catch (InvalidOperationException ex) when (ex.Message.Contains("collision", StringComparison.OrdinalIgnoreCase))
+		{
+			return Results.Conflict(new { error = "session_id_in_use", message = ex.Message });
+		}
 
 		return Results.Json(BuildResponse(session, opts.Value), SessionJson.Options, statusCode: StatusCodes.Status201Created);
 	}
@@ -206,7 +264,19 @@ public static class OpenVSCodeServerEndpointRouteBuilderExtensions
 	private static CreateSessionResponse BuildResponse(VSCodeSession session, OpenVSCodeServerOptions options)
 	{
 		var mount = options.PathPrefix is { Length: > 0 } prefix ? prefix : "/";
-		var ideBase = mount == "/" ? "/" : mount + "/";
+		// When session-in-path is on the URL has to include the session id so the proxy validates
+		// it; otherwise the prefix alone is enough and the browser passes ?folder= verbatim.
+		string ideBase;
+		if (options.Sessions.RequireSessionInPath)
+		{
+			ideBase = mount == "/"
+				? "/" + session.SessionId + "/"
+				: mount + "/" + session.SessionId + "/";
+		}
+		else
+		{
+			ideBase = mount == "/" ? "/" : mount + "/";
+		}
 		var ideUrl = ideBase + "?folder=" + Uri.EscapeDataString(session.WorkspaceFolder);
 		return new CreateSessionResponse(session.SessionId, session.WorkspaceFolder, ideUrl);
 	}
@@ -222,7 +292,8 @@ public static class OpenVSCodeServerEndpointRouteBuilderExtensions
 	}
 
 	private sealed record CreateSessionRequest(
-		[property: JsonPropertyName("state")] Dictionary<string, string>? State);
+		[property: JsonPropertyName("state")] Dictionary<string, string>? State,
+		[property: JsonPropertyName("sessionId")] string? SessionId);
 
 	private sealed record CreateSessionResponse(
 		[property: JsonPropertyName("sessionId")] string SessionId,

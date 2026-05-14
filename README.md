@@ -161,6 +161,28 @@ That exposes:
 
 Sessions also self-evict after `Sessions.IdleTimeout` (default 30 min); the sweeper looks at every active session every `Sessions.IdleSweepInterval` (default 1 min) and ends any that haven't seen traffic. Proxy traffic with a matching `?folder=` query refreshes the timer automatically, so users actively editing a workbench tab don't get evicted. Set `IdleTimeout` to `TimeSpan.Zero` to disable idle GC entirely.
 
+### Session id in the URL path (`RequireSessionInPath`)
+
+Setting `Sessions.RequireSessionInPath = true` makes `MapOpenVSCodeServer("/ide")` mount at `/ide/{sessionId}/{**catchall}` instead of the bare catchall. The proxy looks up the session id before forwarding upstream and returns 404 on anything unknown — so you can't reach the IDE at all without holding a live session id.
+
+```csharp
+builder.Services.AddOpenVSCodeServer(options =>
+{
+    options.Sessions.RequireSessionInPath = true;
+});
+
+app.MapOpenVSCodeServer("/ide").WithSessions("/sessions");
+```
+
+Resulting wire shape:
+
+- `POST /sessions` (optionally accepts `{ "sessionId": "..." }` to supply your own id; otherwise a `Guid.NewGuid().ToString("N")` is generated) returns `ideUrl = /ide/<sessionId>/?folder=...`.
+- `GET /ide/<unknownId>/...` → `404` before any traffic reaches the node child.
+- `GET /ide/<validId>/static/app.js` → forwarded upstream with `X-Forwarded-Prefix: /ide/<validId>` set; vscode honors that header (see upstream `webClientServer.ts`) and emits absolute URLs that already include the session id, so the browser never escapes the session scope.
+- The `DELETE /sessions/{id}` and `POST /sessions/{id}/heartbeat` endpoints take the id as a path parameter and 404 on unknown ids the same way.
+
+Pair with `ValidateUser` (above) for end-to-end auth: `ValidateUser` decides who can create sessions, the path-scoped proxy ensures only holders of a live id can talk to one, and ASP.NET Core authorization on the routes (`RequireAuthorization()`) layers user identity on top.
+
 ### Authenticating session creation
 
 Plug your own auth into `Sessions.ValidateUser`. The hook runs at the top of `POST /sessions`, before any temp folder is created. Return `null` to accept the request or any `IResult` (e.g. `Results.Unauthorized()`) to reject it; the hook can also mutate the `state` dictionary to thread server-trusted values (user id, tenant) down to `IVSCodeFiles.InitializeAsync`.
