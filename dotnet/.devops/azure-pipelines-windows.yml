@@ -1,6 +1,6 @@
 # Azure DevOps pipeline that builds the openvscode-server win32-x64 (win64)
-# distribution, packs it into the .NET library, and publishes the resulting
-# NuGet package as a build artifact.
+# distribution and publishes the resulting tar.gz archive as a build
+# artifact for later embedding into the .NET library.
 #
 # Trigger this pipeline from Azure DevOps and select it as the YAML source:
 #   dotnet/.build/azure-pipelines-windows.yml
@@ -8,25 +8,15 @@
 # What it does, in order:
 #   1. Checks out the repository.
 #   2. Installs the Node.js version pinned in .nvmrc.
-#   3. Installs the .NET SDK that the library targets (net10.0).
-#   4. Runs scripts/build-vscode-release.ps1 to produce
+#   3. Runs scripts/build-vscode-release.ps1 to produce
 #      vscode-reh-web-win32-x64.tar.gz under
 #      dotnet/OpenVSCodeServer.Kestrel/EmbeddedAssets/.
-#   5. Runs `dotnet pack` so the .nupkg embeds the freshly-built archive.
-#   6. Publishes both the .tar.gz and the .nupkg as pipeline artifacts.
+#   4. Publishes the .tar.gz as a pipeline artifact.
 
 name: $(Date:yyyyMMdd).$(Rev:r)
 
 trigger: none           # manual / scheduled / API-driven; no automatic trigger
 pr: none
-
-parameters:
-  - name: buildConfiguration
-    type: string
-    default: Release
-    values:
-      - Debug
-      - Release
 
 variables:
   - name: vmImage
@@ -37,8 +27,6 @@ variables:
     value: win32
   - name: vscodeArch
     value: x64
-  - name: dotnetSdkVersion
-    value: '10.0.x'
   # Skip downloads we never need for a reh-web build.
   - name: ELECTRON_SKIP_BINARY_DOWNLOAD
     value: '1'
@@ -69,16 +57,9 @@ stages:
               versionSource: 'fromFile'
               versionFilePath: '.nvmrc'
 
-          - task: UseDotNet@2
-            displayName: Use .NET SDK $(dotnetSdkVersion)
-            inputs:
-              packageType: sdk
-              version: $(dotnetSdkVersion)
-
           - powershell: |
               node --version
               npm  --version
-              dotnet --info
             displayName: Show tool versions
 
           # The gulp build writes its output one level above the repo root
@@ -101,40 +82,9 @@ stages:
                   Select-Object Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
             displayName: Show staged archive(s)
 
-          - task: DotNetCoreCLI@2
-            displayName: dotnet restore
-            inputs:
-              command: restore
-              projects: dotnet/OpenVSCodeServer.slnx
-
-          - task: DotNetCoreCLI@2
-            displayName: dotnet build (${{ parameters.buildConfiguration }})
-            inputs:
-              command: build
-              projects: dotnet/OpenVSCodeServer.slnx
-              arguments: --configuration ${{ parameters.buildConfiguration }} --no-restore
-
-          - task: DotNetCoreCLI@2
-            displayName: dotnet pack (${{ parameters.buildConfiguration }})
-            inputs:
-              command: pack
-              packagesToPack: dotnet/OpenVSCodeServer.Kestrel/OpenVSCodeServer.Kestrel.csproj
-              configuration: ${{ parameters.buildConfiguration }}
-              nobuild: true
-              includesymbols: true
-              versioningScheme: off
-              outputDir: $(Build.ArtifactStagingDirectory)/nupkg
-
           - task: PublishPipelineArtifact@1
             displayName: Publish reh-web archive
             inputs:
               targetPath: dotnet/OpenVSCodeServer.Kestrel/EmbeddedAssets
               artifact: vscode-reh-web-win32-x64
-              publishLocation: pipeline
-
-          - task: PublishPipelineArtifact@1
-            displayName: Publish NuGet package
-            inputs:
-              targetPath: $(Build.ArtifactStagingDirectory)/nupkg
-              artifact: OpenVSCodeServer.Kestrel-win32-x64-nupkg
               publishLocation: pipeline
