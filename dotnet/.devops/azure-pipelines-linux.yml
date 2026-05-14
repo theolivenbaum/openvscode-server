@@ -1,0 +1,157 @@
+# Azure DevOps pipeline that builds the openvscode-server linux-x64
+# distribution, packs it into the .NET library, and publishes the resulting
+# NuGet package as a build artifact.
+#
+# Trigger this pipeline from Azure DevOps and select it as the YAML source:
+#   dotnet/.devops/azure-pipelines-linux.yml
+#
+# What it does, in order:
+#   1. Checks out the repository.
+#   2. Installs the Node.js version pinned in .nvmrc.
+#   3. Installs the .NET SDK that the library targets (net10.0).
+#   4. Runs scripts/build-vscode-release.sh linux x64 to produce
+#      vscode-reh-web-linux-x64.tar.gz under
+#      dotnet/OpenVSCodeServer.Kestrel/EmbeddedAssets/.
+#   5. Runs `dotnet pack` so the .nupkg embeds the freshly-built archive.
+#   6. Publishes both the .tar.gz and the .nupkg as pipeline artifacts.
+
+name: $(Date:yyyyMMdd).$(Rev:r)
+
+trigger: none           # manual / scheduled / API-driven; no automatic trigger
+pr: none
+
+parameters:
+  - name: buildConfiguration
+    type: string
+    default: Release
+    values:
+      - Debug
+      - Release
+  - name: vscodeArch
+    type: string
+    default: x64
+    values:
+      - x64
+      - arm64
+
+variables:
+  - name: vmImage
+    value: ubuntu-latest
+  - name: vscodePlatform
+    value: linux
+  - name: dotnetSdkVersion
+    value: '10.0.x'
+  - name: ELECTRON_SKIP_BINARY_DOWNLOAD
+    value: '1'
+  - name: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD
+    value: '1'
+
+stages:
+  - stage: Build
+    displayName: Build Linux ${{ parameters.vscodeArch }}
+    jobs:
+      - job: Build
+        displayName: vscode-reh-web-linux-${{ parameters.vscodeArch }}
+        pool:
+          vmImage: $(vmImage)
+        timeoutInMinutes: 120
+        variables:
+          - name: npm_config_arch
+            value: ${{ parameters.vscodeArch }}
+          - name: VSCODE_ARCH
+            value: ${{ parameters.vscodeArch }}
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            displayName: Checkout sources
+
+          - task: NodeTool@0
+            displayName: Use Node.js from .nvmrc
+            inputs:
+              versionSource: 'fromFile'
+              versionFilePath: '.nvmrc'
+
+          - task: UseDotNet@2
+            displayName: Use .NET SDK $(dotnetSdkVersion)
+            inputs:
+              packageType: sdk
+              version: $(dotnetSdkVersion)
+
+          - bash: |
+              set -e
+              # Native build deps needed by node-gyp on hosted Ubuntu agents
+              # for the modules the reh-web build compiles (kerberos, native-keymap,
+              # native-watchdog, spdlog, etc.).
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends \
+                  build-essential \
+                  fakeroot \
+                  rpm \
+                  libx11-dev \
+                  libxkbfile-dev \
+                  libsecret-1-dev \
+                  libkrb5-dev \
+                  python3-setuptools
+            displayName: Install native build dependencies
+
+          - bash: |
+              set -e
+              node --version
+              npm  --version
+              dotnet --info
+            displayName: Show tool versions
+
+          - bash: |
+              set -e
+              chmod +x scripts/build-vscode-release.sh
+              ./scripts/build-vscode-release.sh "$(vscodePlatform)" "$(VSCODE_ARCH)"
+            displayName: Build openvscode-server (linux-${{ parameters.vscodeArch }})
+            env:
+              ELECTRON_SKIP_BINARY_DOWNLOAD: $(ELECTRON_SKIP_BINARY_DOWNLOAD)
+              PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: $(PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD)
+              npm_config_arch: $(npm_config_arch)
+              VSCODE_ARCH: $(VSCODE_ARCH)
+
+          - bash: |
+              set -e
+              ls -la dotnet/OpenVSCodeServer.Kestrel/EmbeddedAssets/*.tar.gz
+              du -h  dotnet/OpenVSCodeServer.Kestrel/EmbeddedAssets/*.tar.gz
+            displayName: Show staged archive(s)
+
+          - task: DotNetCoreCLI@2
+            displayName: dotnet restore
+            inputs:
+              command: restore
+              projects: dotnet/OpenVSCodeServer.slnx
+
+          - task: DotNetCoreCLI@2
+            displayName: dotnet build (${{ parameters.buildConfiguration }})
+            inputs:
+              command: build
+              projects: dotnet/OpenVSCodeServer.slnx
+              arguments: --configuration ${{ parameters.buildConfiguration }} --no-restore
+
+          - task: DotNetCoreCLI@2
+            displayName: dotnet pack (${{ parameters.buildConfiguration }})
+            inputs:
+              command: pack
+              packagesToPack: dotnet/OpenVSCodeServer.Kestrel/OpenVSCodeServer.Kestrel.csproj
+              configuration: ${{ parameters.buildConfiguration }}
+              nobuild: true
+              includesymbols: true
+              versioningScheme: off
+              outputDir: $(Build.ArtifactStagingDirectory)/nupkg
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish reh-web archive
+            inputs:
+              targetPath: dotnet/OpenVSCodeServer.Kestrel/EmbeddedAssets
+              artifact: vscode-reh-web-linux-${{ parameters.vscodeArch }}
+              publishLocation: pipeline
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish NuGet package
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)/nupkg
+              artifact: OpenVSCodeServer.Kestrel-linux-${{ parameters.vscodeArch }}-nupkg
+              publishLocation: pipeline
