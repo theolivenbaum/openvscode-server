@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Build the openvscode-server distribution and stage it as an embedded resource for the
 # .NET library. This is intentionally idempotent so it can be re-run after a code change.
+#
+# Works on Linux and macOS. For Windows use scripts/build-vscode-release.ps1.
 set -euo pipefail
 
 usage() {
@@ -8,6 +10,11 @@ usage() {
 Usage: $0 [platform] [arch]
   platform   linux | darwin | win32 | alpine   (default: detected from host)
   arch       x64 | arm64 | ia32                 (default: detected from host)
+
+Examples:
+  $0                       # auto-detect host (e.g. darwin arm64 on Apple Silicon)
+  $0 linux x64
+  $0 darwin arm64          # macOS Apple Silicon
 
 Output:
   dotnet/OpenVSCodeServer.Kestrel/EmbeddedAssets/vscode-reh-web-<platform>-<arch>.tar.gz
