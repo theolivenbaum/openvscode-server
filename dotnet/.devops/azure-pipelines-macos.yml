@@ -39,6 +39,9 @@ variables:
   # which can otherwise fail to resolve at runtime on hosted macOS agents.
   - name: GYP_DEFINES
     value: kerberos_use_rtld=false
+  # Trim built-in extensions to what a pure C# / BYO-LSP environment needs.
+  - name: VSCODE_MINIMAL_BUILD
+    value: '1'
 
 stages:
   - stage: Build
@@ -82,6 +85,7 @@ stages:
               npm_config_arch: $(npm_config_arch)
               VSCODE_ARCH: $(VSCODE_ARCH)
               GYP_DEFINES: $(GYP_DEFINES)
+              VSCODE_MINIMAL_BUILD: $(VSCODE_MINIMAL_BUILD)
 
           - bash: |
               set -e
