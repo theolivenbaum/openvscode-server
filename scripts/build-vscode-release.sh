@@ -68,9 +68,16 @@ else
 fi
 
 # --- gulp build -----------------------------------------------------------------------------
+# Invoke gulp directly so we can cap V8's heap below the package.json default of 8192 MiB.
+# Microsoft-hosted CI agents (ubuntu-latest, windows-latest, macos-latest) only have ~7 GiB
+# of RAM, so an 8 GiB heap forces the OS to swap during the minification stage and triggers
+# "Free memory is lower than 5%" agent warnings. 6144 MiB leaves headroom for the rest of
+# the toolchain (esbuild, terser, native module compilation) without OOM-ing on small hosts.
+# Override with VSCODE_NODE_MAX_OLD_SPACE_MB on beefier machines.
+NODE_MAX_OLD_SPACE_MB="${VSCODE_NODE_MAX_OLD_SPACE_MB:-6144}"
 GULP_TASK="${DISTRO_NAME}-min"
-echo "==> npm run gulp ${GULP_TASK}"
-npm run gulp -- "${GULP_TASK}"
+echo "==> gulp ${GULP_TASK} (--max-old-space-size=${NODE_MAX_OLD_SPACE_MB})"
+node "--max-old-space-size=${NODE_MAX_OLD_SPACE_MB}" ./node_modules/gulp/bin/gulp.js "${GULP_TASK}"
 
 # The gulp output lives one level above the repo (BUILD_ROOT = path.dirname(REPO_ROOT)).
 BUILD_ROOT=$(cd "$ROOT_DIR/.." && pwd)
